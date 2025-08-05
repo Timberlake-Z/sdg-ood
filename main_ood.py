@@ -470,7 +470,7 @@ def train(model, exp_name, kwargs):
             optimizer.zero_grad()
             loss_combine.backward()
 
-        optimizer.step()
+            optimizer.step()
 
         # tim, do some evaluation every 1000 iterations
         if t % args.print_freq == 0:
