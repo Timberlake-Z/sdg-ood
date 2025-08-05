@@ -411,9 +411,17 @@ def train(model, exp_name, kwargs, device):
     d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=1e-3)
 
 
+    # 获取标准化参数
+    if 'cifar' in args.dataset:
+        cifar_mean = [x / 255 for x in [125.3, 123.0, 113.9]]
+        cifar_std = [x / 255 for x in [63.0, 62.1, 66.7]]
+    else:
+        cifar_mean = [0.485, 0.456, 0.406]
+        cifar_std = [0.229, 0.224, 0.225]
+
     # tim pre-train wae on source domain -> auxiliary set
     for epoch in range(1, 20 + 1):
-        wae_train(wae, discriminator, auxiliary_loader, wae_optimizer, d_optimizer, epoch, device)
+        wae_train(wae, discriminator, auxiliary_loader, wae_optimizer, d_optimizer, epoch, device, cifar_mean, cifar_std)
 
     print('Training task model')
     # define loss function (criterion) and optimizer
@@ -557,7 +565,7 @@ def train(model, exp_name, kwargs, device):
                 discriminator = Adversary().to(device)
                 d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=1e-3)
                 for epoch in range(1, 20 + 1):
-                    wae_train(wae, discriminator, new_aug_loader, wae_optimizer, d_optimizer, epoch, device)
+                    wae_train(wae, discriminator, new_aug_loader, wae_optimizer, d_optimizer, epoch, device, cifar_mean, cifar_std)
             aug_end_time = time.time()
             print('aug duration', (aug_end_time - aug_start_time) / 60)
             counter_k += 1
@@ -681,7 +689,7 @@ def train(model, exp_name, kwargs, device):
         }, args.dataset, exp_name)
         # ---------------------------------------------
 
-def wae_train(model, D, new_aug_loader, optimizer, d_optimizer, epoch, device):
+def wae_train(model, D, new_aug_loader, optimizer, d_optimizer, epoch, device, mean, std):
 
     def sample_z(n_sample=None, dim=None, sigma=None, template=None):
         if template is not None:
@@ -706,10 +714,14 @@ def wae_train(model, D, new_aug_loader, optimizer, d_optimizer, epoch, device):
         input_comb = data.to(device).float()
         batch_size = input_comb.size(0)
         
+        # 安全转换到[0,1]范围用于WAE
+        input_unnorm = safe_unnormalize(input_comb, mean, std)
+        
         optimizer.zero_grad()
         d_optimizer.zero_grad()
 
-        recon_batch, z_tilde = model(input_comb)
+        # WAE在[0,1]数据上工作
+        recon_batch, z_tilde = model(input_unnorm)
         z = sample_z(template=z_tilde, sigma=z_sigma)
         log_p_z = log_density_igaussian(z, z_var).view(-1, 1)
 
@@ -732,11 +744,12 @@ def wae_train(model, D, new_aug_loader, optimizer, d_optimizer, epoch, device):
         d_optimizer.step()
 
         # Recalculate for generator loss to avoid reusing modified tensors
-        z_tilde_fresh = model.encode(input_comb.view(batch_size, -1))
+        z_tilde_fresh = model.encode(input_unnorm.view(batch_size, -1))
         D_z_tilde_fresh = D(z_tilde_fresh)
         log_p_z_fresh = log_density_igaussian(z_tilde_fresh, z_var).view(-1, 1)
         
-        BCE = F.binary_cross_entropy(recon_batch, input_comb.view(batch_size, -1), reduction='sum')
+        # BCE损失使用unnormalized数据作为target
+        BCE = F.binary_cross_entropy(recon_batch, input_unnorm.view(batch_size, -1), reduction='sum')
         Q_loss = F.binary_cross_entropy_with_logits(D_z_tilde_fresh + log_p_z_fresh, ones_g)
         loss = BCE + param * Q_loss
         loss.backward()
