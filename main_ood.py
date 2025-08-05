@@ -508,16 +508,19 @@ def train(model, exp_name, kwargs, device):
 
                 if counter_k == 0:
                     input_feat, output = model.functional(params, False, input_a, return_feat=True)
-                    recon_batch, _, = wae(input_a)
+                    input_a_unnorm = safe_unnormalize(input_a, cifar_mean, cifar_std)
+                    recon_batch, _, = wae(input_a_unnorm)
                 else:
                     input_feat, output = model.functional(params, False, input_comb, return_feat=True)
-                    recon_batch, _, = wae(input_comb)
+                    input_comb_unnorm = safe_unnormalize(input_comb, cifar_mean, cifar_std)
+                    recon_batch, _, = wae(input_comb_unnorm)
                 #-------------------------------------------------------------------
                 # iteratively generate adversarial samples
                 for n in range(args.T_adv):
                     # input_aug_feat is the feature before classifier, output_aug is the logits
                     input_aug_feat, output_aug = model.functional(params, False, input_aug, return_feat=True)
-                    recon_batch_aug, _, = wae(input_aug)
+                    input_aug_unnorm = safe_unnormalize(input_aug, cifar_mean, cifar_std)
+                    recon_batch_aug, _, = wae(input_aug_unnorm)
                     # Constraint
                     constraint = mse_loss(input_feat, input_aug_feat)
                     oe_loss = l_oe(output_aug)
