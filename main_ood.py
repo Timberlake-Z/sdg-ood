@@ -213,7 +213,9 @@ def main():
     global args
     args = parser.parse_args()
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"  # see issue #152 on stackoverflow
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.GPU_ID)
+    # Fix: Only set CUDA_VISIBLE_DEVICES if not already set
+    if "CUDA_VISIBLE_DEVICES" not in os.environ or os.environ["CUDA_VISIBLE_DEVICES"] == "":
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.GPU_ID)
 
     exp_name = args.name
 
@@ -229,11 +231,8 @@ def main():
         num_classes = 10
     else:
         num_classes = 100
-    # Check CUDA availability - force CPU if CUDA_VISIBLE_DEVICES is empty
-    if os.environ.get('CUDA_VISIBLE_DEVICES') == '':
-        device = torch.device('cpu')
-    else:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Check CUDA availability
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
     
     net = WideResNet(args.wrn_layers, num_classes, args.wrn_widen_factor, dropRate=args.droprate).to(device)
@@ -420,10 +419,16 @@ def train(model, exp_name, kwargs, device):
         cifar_std = [0.229, 0.224, 0.225]
 
     # tim pre-train wae on source domain -> auxiliary set
-    for epoch in range(1, 20 + 1):
-        wae_train(wae, discriminator, auxiliary_loader, wae_optimizer, d_optimizer, epoch, device, cifar_mean, cifar_std)
+    skip_wae = True  # Set to True to skip WAE pre-training for testing
+    print(f"PyTorch version: {torch.__version__}, CUDA available: {torch.cuda.is_available()}")
+    if skip_wae:
+        print('Skipping WAE pre-training for testing...')
+    else:
+        for epoch in range(1, 20 + 1):
+            wae_train(wae, discriminator, auxiliary_loader, wae_optimizer, d_optimizer, epoch, device, cifar_mean, cifar_std)
 
     print('Training task model')
+    print(f'Total iterations: {args.num_iters}, Start iter: {args.start_iters}')
     # define loss function (criterion) and optimizer
     # tim, comment the code for modify the loss structure
     # criterion = nn.CrossEntropyLoss().cuda()
@@ -453,6 +458,11 @@ def train(model, exp_name, kwargs, device):
     counter_k = 0
 
     for t in range(args.start_iters, args.num_iters):
+        
+        # Progress tracking
+        if t % 100 == 0:
+            print(f'\n--- Iteration {t}/{args.num_iters} ---')
+            print(f'Counter K: {counter_k}, Augmented images: {len(augumented_images)}')
 
         batch_time = AverageMeter()
         losses = AverageMeter()
@@ -471,7 +481,15 @@ def train(model, exp_name, kwargs, device):
         # 2. the number of augmented domains is less than K
         # 3. reach the interval of T_min
         #-------------------------------
+        # Debug: print conditions
+        if t % 10 == 0 and t > 0:
+            cond1 = t > args.advstart_iter
+            cond2 = (t + 1 - args.advstart_iter) % args.T_min == 0
+            cond3 = counter_k < args.K
+            print(f"  Domain Aug Check: t={t}, cond1={cond1}, cond2={cond2}, cond3={cond3}, counter_k={counter_k}/{args.K}")
+        
         if (t > args.advstart_iter) and ((t + 1 - args.advstart_iter) % args.T_min == 0) and (counter_k < args.K):
+            print(f'\n🔄 Domain Augmentation at iteration {t} (counter_k={counter_k})')
             model.eval()
             params = list(model.parameters())
 
@@ -510,10 +528,18 @@ def train(model, exp_name, kwargs, device):
                     input_feat, output = model.functional(params, False, input_a, return_feat=True)
                     input_a_unnorm = safe_unnormalize(input_a, cifar_mean, cifar_std)
                     recon_batch, _, = wae(input_a_unnorm)
+                    # Normalize back to standardized space and detach to prevent gradient issues
+                    recon_batch_norm = safe_normalize(recon_batch, cifar_mean, cifar_std).detach()
                 else:
                     input_feat, output = model.functional(params, False, input_comb, return_feat=True)
                     input_comb_unnorm = safe_unnormalize(input_comb, cifar_mean, cifar_std)
                     recon_batch, _, = wae(input_comb_unnorm)
+                    # Normalize back to standardized space and detach to prevent gradient issues
+                    recon_batch_norm = safe_normalize(recon_batch, cifar_mean, cifar_std).detach()
+                
+                # Detach input_feat to prevent gradient flow through it
+                input_feat = input_feat.detach()
+                
                 #-------------------------------------------------------------------
                 # iteratively generate adversarial samples
                 for n in range(args.T_adv):
@@ -521,11 +547,15 @@ def train(model, exp_name, kwargs, device):
                     input_aug_feat, output_aug = model.functional(params, False, input_aug, return_feat=True)
                     input_aug_unnorm = safe_unnormalize(input_aug, cifar_mean, cifar_std)
                     recon_batch_aug, _, = wae(input_aug_unnorm)
-                    # Constraint
+                    
+                    # Normalize WAE output back to standardized space for consistent comparison
+                    recon_batch_aug_norm = safe_normalize(recon_batch_aug, cifar_mean, cifar_std)
+                    
+                    # Constraint: compare features in feature space
                     constraint = mse_loss(input_feat, input_aug_feat)
                     oe_loss = l_oe(output_aug)
-                    # Relaxation
-                    relaxation = mse_loss(recon_batch, recon_batch_aug)
+                    # Relaxation: compare reconstructions in standardized space
+                    relaxation = mse_loss(recon_batch_norm, recon_batch_aug_norm)
                     adv_loss = -(args.beta * relaxation + oe_loss - args.gamma * constraint)
                     aug_optimizer.zero_grad()
                     adv_loss.backward()
@@ -572,6 +602,7 @@ def train(model, exp_name, kwargs, device):
             aug_end_time = time.time()
             print('aug duration', (aug_end_time - aug_start_time) / 60)
             counter_k += 1
+            print(f'✅ Domain augmentation completed. Total augmented samples: {len(augumented_images)}, counter_k: {counter_k}')
 
 
         # start to train the model paramters
@@ -612,6 +643,8 @@ def train(model, exp_name, kwargs, device):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            if t % 50 == 0:
+                print(f'  Regular training - Loss: {loss.item():.4f} (ID: {loss_id.item():.4f}, OOD: {loss_ood.item():.4f})')
 
         # meta learning structure
         # Need to consider if need an extra ID batch for meta learning, or only keep the agumented data for ood loss,
@@ -648,9 +681,11 @@ def train(model, exp_name, kwargs, device):
             optimizer.zero_grad()
             loss_combine.backward()
             optimizer.step()
+            if t % 50 == 0:
+                print(f'  Meta-learning - Loss: {loss_combine.item():.4f} (Original: {loss.item():.4f}, Aug: {loss2.item():.4f})')
 
         # tim, do some evaluation every 1000 iterations
-        if t % args.print_freq == 0:
+        if t % args.print_freq == 0 and t > 0:  # Skip evaluation at iteration 0 for speed
             model.eval()
             in_score = get_in_scores(model, test_loader, in_dist=True)
             metric_all = []
