@@ -17,6 +17,7 @@ import torchvision.transforms as trn
 import torchvision.datasets as dset
 from utils.digits_process_dataset import *
 from models.wrn import WideResNet
+from ood_evaluation import evaluate_ood_detection, print_ood_results
 
 torch.manual_seed(0)
 numpy.random.seed(0)
@@ -200,6 +201,9 @@ def get_dataloaders(args):
     isun_loader = torch.utils.data.DataLoader(isun_data, batch_size=args.test_bs, shuffle=True, **kwargs)
     cifar_loader = torch.utils.data.DataLoader(cifar_data, batch_size=args.test_bs, shuffle=True, **kwargs)
 
+    # Calculate ood_num_examples as 1/5 of test data size
+    ood_num_examples = len(test_data) // 5
+    
     return train_loader_in, test_loader, auxiliary_loader, {
         'texture': texture_loader,
         'places365': places365_loader,
@@ -207,7 +211,7 @@ def get_dataloaders(args):
         'lsunr': lsunr_loader,
         'isun': isun_loader,
         'cifar': cifar_loader
-    }, num_classes
+    }, num_classes, ood_num_examples
 
 def main():
     global args
@@ -304,49 +308,6 @@ def asarray_and_reshape_ood(data_list):
     data_array = numpy.concatenate(data_list, axis=0)
     return data_array
 
-def get_in_scores(model, test_loader, in_dist=True):
-    """Get confidence scores for in-distribution test data."""
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.eval()
-    confidence_scores = []
-    
-    with torch.no_grad():
-        for data, _ in test_loader:
-            data = data.to(device)
-            logits = model.module(data)
-            smax = F.softmax(logits, dim=1)
-            confidence = torch.max(smax, dim=1)[0]
-            confidence_scores.extend(confidence.cpu().numpy())
-    
-    return numpy.array(confidence_scores)
-
-def get_ood_results(model, test_name, test_loader):
-    """Get OOD detection results for a specific test dataset."""
-    from sklearn.metrics import roc_auc_score, average_precision_score
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.eval()
-    ood_scores = []
-    
-    with torch.no_grad():
-        for data, _ in test_loader:
-            data = data.to(device)
-            logits = model.module(data)
-            smax = F.softmax(logits, dim=1)
-            confidence = torch.max(smax, dim=1)[0]
-            ood_scores.extend(confidence.cpu().numpy())
-    
-    # For evaluation, we need ID scores too
-    # This is a simplified version - normally would compare against stored ID scores
-    ood_scores = numpy.array(ood_scores)
-    
-    # Return basic statistics for now
-    return {
-        'auroc': numpy.mean(ood_scores),  # Placeholder
-        'aupr': numpy.std(ood_scores),    # Placeholder  
-        'mean_score': numpy.mean(ood_scores),
-        'std_score': numpy.std(ood_scores)
-    }
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -402,7 +363,7 @@ def train(model, exp_name, kwargs, device):
     # construct train and val dataloader
     # tim, modify the dataloader here 
     # train_loader, val_loader = construct_datasets(args.data_dir, args.batch_size, kwargs)
-    id_loader, test_loader, auxiliary_loader, ood_test_loaders, num_classes = get_dataloaders(args)
+    id_loader, test_loader, auxiliary_loader, ood_test_loaders, num_classes, ood_num_examples = get_dataloaders(args)
 
     wae = WAE().to(device)
     wae_optimizer = torch.optim.Adam(wae.parameters(), lr=1e-3)
@@ -420,6 +381,7 @@ def train(model, exp_name, kwargs, device):
 
     # tim pre-train wae on source domain -> auxiliary set
     skip_wae = True  # Set to True to skip WAE pre-training for testing
+    print_aug_progress = True  # Print progress during domain augmentation
     print(f"PyTorch version: {torch.__version__}, CUDA available: {torch.cuda.is_available()}")
     if skip_wae:
         print('Skipping WAE pre-training for testing...')
@@ -501,8 +463,10 @@ def train(model, exp_name, kwargs, device):
 
         # the `for` structure generates `break_point` * batchsize new samples by training
         # cuz set `shuffle=True`, the data loader will shuffle the data every time
+            print(f"  Processing {break_point} batches from auxiliary_loader...")
             for i, (input_a, target_a) in enumerate(auxiliary_loader):
-
+                if i % 100 == 0:
+                    print(f"    Batch {i}/{break_point}")
                 # just use the first `break_point` batches from auxiliary_loader
                 if i == break_point:
                     break
@@ -542,6 +506,8 @@ def train(model, exp_name, kwargs, device):
                 
                 #-------------------------------------------------------------------
                 # iteratively generate adversarial samples
+                if t % 10 == 0:
+                    print(f"  Starting adversarial generation with T_adv={args.T_adv} iterations")
                 for n in range(args.T_adv):
                     # input_aug_feat is the feature before classifier, output_aug is the logits
                     input_aug_feat, output_aug = model.functional(params, False, input_aug, return_feat=True)
@@ -687,12 +653,12 @@ def train(model, exp_name, kwargs, device):
         # tim, do some evaluation every 1000 iterations
         if t % args.print_freq == 0 and t > 0:  # Skip evaluation at iteration 0 for speed
             model.eval()
-            in_score = get_in_scores(model, test_loader, in_dist=True)
-            metric_all = []
-            for test_name, test_loader_ood in ood_test_loaders.items():
-                metric = get_ood_results(model, test_name, test_loader_ood)
-                metric_all.append(metric)
-                print(f"{test_name} - AUROC: {metric['auroc']:.4f}, AUPR: {metric['aupr']:.4f}")
+            # Use the new evaluation module
+            results = evaluate_ood_detection(
+                model, test_loader, ood_test_loaders, 
+                device, ood_num_examples, args.test_bs
+            )
+            print_ood_results(results, ood_num_examples)
 
 
 
