@@ -13,6 +13,7 @@ import torchvision.datasets as dset
 from torch.utils.data import DataLoader
 
 from models.wrn import WideResNet
+from metann import Learner
 from ood_evaluation import evaluate_ood_detection, print_ood_results
 
 # Set random seeds for reproducibility
@@ -21,7 +22,7 @@ np.random.seed(0)
 
 # Argument parser
 parser = argparse.ArgumentParser(description='Outlier Exposure Baseline for OOD Detection')
-parser.add_argument('--data_dir', default='../data', type=str, help='Root directory for datasets')
+parser.add_argument('--data_dir', default='./data', type=str, help='Root directory for datasets')
 parser.add_argument('--dataset', default='cifar10', type=str, choices=['cifar10', 'cifar100'])
 parser.add_argument('--model', default='wrn', type=str, help='Model architecture')
 parser.add_argument('--wrn_layers', default=40, type=int, help='WideResNet layers')
@@ -89,15 +90,17 @@ def get_dataloaders(args):
         train_data_in = dset.CIFAR100(args.data_dir + '/cifarpy', train=True, transform=train_transform, download=True)
         test_data = dset.CIFAR100(args.data_dir + '/cifarpy', train=False, transform=test_transform, download=True)
     
-    # Auxiliary OE training data (80M Tiny Images subset)
-    oe_data = dset.ImageFolder(args.data_dir + '/tiny_images/300K_random_images', 
-                               transform=trn.Compose([
-                                   trn.ToTensor(), 
-                                   trn.ToPILImage(),
-                                   trn.RandomCrop(32, padding=4),
-                                   trn.RandomHorizontalFlip(), 
-                                   trn.ToTensor(), 
-                                   trn.Normalize(mean, std)]))
+    # Auxiliary OE training data (Tiny ImageNet-200, same as main_ood.py)
+    oe_data = dset.ImageFolder(
+        root="../data/tiny-imagenet-200/train/",
+        transform=trn.Compose([
+            trn.Resize(32),
+            trn.RandomCrop(32, padding=4),
+            trn.RandomHorizontalFlip(),
+            trn.ToTensor(),
+            trn.Normalize(mean, std)
+        ])
+    )
     
     # Create data loaders
     train_loader_in = DataLoader(train_data_in, batch_size=args.batch_size, shuffle=True, num_workers=4)
@@ -176,8 +179,9 @@ def load_model(args, num_classes, device):
     print(f"  Classes: {num_classes}")
     print(f"  Checkpoint: {args.pretrained_model}")
     
-    # Create model
-    net = WideResNet(args.wrn_layers, num_classes, args.wrn_widen_factor, dropRate=args.droprate).to(device)
+    # Create model wrapped with Learner (same as main_ood.py for consistency)
+    base_net = WideResNet(args.wrn_layers, num_classes, args.wrn_widen_factor, dropRate=args.droprate).to(device)
+    net = Learner(base_net)
     
     # Load pretrained checkpoint
     if os.path.exists(args.pretrained_model):
@@ -195,7 +199,8 @@ def load_model(args, num_classes, device):
         if any(key.startswith('module.') for key in state_dict.keys()):
             state_dict = {key.replace('module.', ''): value for key, value in state_dict.items()}
         
-        net.load_state_dict(state_dict)
+        # Load state dict into the base WideResNet model
+        base_net.load_state_dict(state_dict)
         print(f"  ✓ Pretrained model loaded successfully!")
     else:
         print(f"  ✗ Pretrained model not found, training from scratch")
