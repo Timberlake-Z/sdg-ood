@@ -112,7 +112,7 @@ def get_dataloaders(args):
     
     # Texture (DTD)
     try:
-        texture_data = dset.ImageFolder(args.data_dir + '/dtd/images', transform=test_transform_resize)
+        texture_data = dset.ImageFolder('../data/dtd/images', transform=test_transform_resize)
         texture_loader = DataLoader(texture_data, batch_size=args.test_bs, shuffle=False, num_workers=4)
         ood_test_loaders['texture'] = texture_loader
         print(f"  ✓ Texture (DTD): {len(texture_data)} samples")
@@ -121,7 +121,7 @@ def get_dataloaders(args):
     
     # Places365
     try:
-        places365_data = dset.ImageFolder(args.data_dir + '/places365', transform=test_transform_resize)
+        places365_data = dset.ImageFolder('../data/places365_standard', transform=test_transform_resize)
         places365_loader = DataLoader(places365_data, batch_size=args.test_bs, shuffle=False, num_workers=4)
         ood_test_loaders['places365'] = places365_loader
         print(f"  ✓ Places365: {len(places365_data)} samples")
@@ -130,7 +130,7 @@ def get_dataloaders(args):
     
     # LSUN-C
     try:
-        lsunc_data = dset.ImageFolder(args.data_dir + '/LSUN', transform=test_transform_resize)
+        lsunc_data = dset.ImageFolder('../data/LSUN', transform=test_transform_resize)
         lsunc_loader = DataLoader(lsunc_data, batch_size=args.test_bs, shuffle=False, num_workers=4)
         ood_test_loaders['lsunc'] = lsunc_loader
         print(f"  ✓ LSUN-C: {len(lsunc_data)} samples")
@@ -139,7 +139,7 @@ def get_dataloaders(args):
     
     # LSUN-R
     try:
-        lsunr_data = dset.ImageFolder(args.data_dir + '/LSUN_resize', transform=test_transform_resize)
+        lsunr_data = dset.ImageFolder('../data/LSUN_resize', transform=test_transform_resize)
         lsunr_loader = DataLoader(lsunr_data, batch_size=args.test_bs, shuffle=False, num_workers=4)
         ood_test_loaders['lsunr'] = lsunr_loader
         print(f"  ✓ LSUN-R: {len(lsunr_data)} samples")
@@ -148,7 +148,7 @@ def get_dataloaders(args):
     
     # iSUN
     try:
-        isun_data = dset.ImageFolder(args.data_dir + '/iSUN', transform=test_transform_resize)
+        isun_data = dset.ImageFolder('../data/iSUN', transform=test_transform_resize)
         isun_loader = DataLoader(isun_data, batch_size=args.test_bs, shuffle=False, num_workers=4)
         ood_test_loaders['isun'] = isun_loader
         print(f"  ✓ iSUN: {len(isun_data)} samples")
