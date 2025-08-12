@@ -18,6 +18,9 @@ import torchvision.datasets as dset
 from utils.digits_process_dataset import *
 from models.wrn import WideResNet
 from ood_evaluation import evaluate_ood_detection, print_ood_results
+from torch.func import functional_call
+from collections import OrderedDict
+import copy
 
 torch.manual_seed(0)
 numpy.random.seed(0)
@@ -114,8 +117,8 @@ parser.add_argument('--wrn_layers', default=40, type=int,
                     help='number of layers for WideResNet')
 parser.add_argument('--wrn_widen_factor', default=2, type=int,
                     help='widen factor for WideResNet')
-parser.add_argument('--droprate', default=0.0, type=float,
-                    help='dropout rate for WideResNet')
+parser.add_argument('--droprate', default=0.3, type=float,
+                    help='dropout rate for WideResNet (same as baseline_oe.py)')
 parser.add_argument('--test_bs', default=200, type=int,
                     help='batch size for test loader')
 parser.add_argument('--pretrained', default=False, action='store_true',
@@ -126,8 +129,13 @@ parser.add_argument('--pretrained', default=False, action='store_true',
 
 def get_dataloaders(args):
     if 'cifar' in args.dataset:
-        mean = [x / 255 for x in [125.3, 123.0, 113.9]]
-        std = [x / 255 for x in [63.0, 62.1, 66.7]]
+        # Use standard CIFAR normalization (same as baseline_oe.py)
+        if args.dataset == 'cifar10':
+            mean = [0.4914, 0.4822, 0.4465]
+            std = [0.2023, 0.1994, 0.2010]
+        else:  # cifar100
+            mean = [0.5071, 0.4867, 0.4408]
+            std = [0.2675, 0.2565, 0.2761]
     else: 
         mean = [0.485, 0.456, 0.406]
         std = [0.229, 0.224, 0.225]
@@ -239,12 +247,10 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
     
+    # Create WideResNet model
     net = WideResNet(args.wrn_layers, num_classes, args.wrn_widen_factor, dropRate=args.droprate).to(device)
-    model = Learner(net)
-    if torch.cuda.is_available():
-        cudnn.benchmark = True
-
-    # could also set up an interface for loading pretrained model
+    
+    # Load pretrained model BEFORE wrapping with Learner (critical for functional() to work correctly)
     if args.pretrained:
         print('=> loading pretrained model')
         if args.dataset == 'cifar10':
@@ -254,15 +260,30 @@ def main():
         checkpoint = torch.load(model_path, map_location=device)
         
         # Handle different model saving formats
+
+        print('go into different saving format')
         if 'module.' in list(checkpoint.keys())[0]:
             # Remove 'module.' prefix if present (from DataParallel)
             new_checkpoint = {}
             for key, value in checkpoint.items():
                 new_key = key.replace('module.', '')
                 new_checkpoint[new_key] = value
-            model.module.load_state_dict(new_checkpoint)
+            net.load_state_dict(new_checkpoint)
         else:
-            model.module.load_state_dict(checkpoint) 
+            net.load_state_dict(checkpoint)
+        
+        print(f"✓ Pretrained model loaded to WideResNet")
+        # Verify the model is not randomly initialized
+        first_layer_weight = net.conv1.weight[0,0,0,0].item()
+        print(f"  First layer weight sample: {first_layer_weight:.6f} (should not be ~0)")
+    
+    # Wrap with Learner AFTER loading pretrained weights
+    # This ensures model.functional() uses the correct pretrained parameters
+    # model = Learner(net)
+    model = net
+    
+    if torch.cuda.is_available():
+        cudnn.benchmark = True 
 
     # tim campared to dal method, we did not use -------
     # optimizer = torch.optim.SGD(net.parameters(), args.learning_rate, momentum=args.momentum, weight_decay=args.decay, nesterov=True)
@@ -273,6 +294,7 @@ def main():
 
     # optionally resume from a checkpoint
     if args.resume:
+        print('arg is resume, continue logic')
         if os.path.isfile(args.resume):
             print("=> loading checkpoint '{}'".format(args.resume))
             checkpoint = torch.load(args.resume)
@@ -380,7 +402,8 @@ def train(model, exp_name, kwargs, device):
         cifar_std = [0.229, 0.224, 0.225]
 
     # tim pre-train wae on source domain -> auxiliary set
-    skip_wae = True  # Set to True to skip WAE pre-training for testing
+    
+    skip_wae = False  # Set to False to enable WAE pre-training for complete workflow
     print_aug_progress = True  # Print progress during domain augmentation
     print(f"PyTorch version: {torch.__version__}, CUDA available: {torch.cuda.is_available()}")
     if skip_wae:
@@ -444,14 +467,14 @@ def train(model, exp_name, kwargs, device):
         # 3. reach the interval of T_min
         #-------------------------------
         # Debug: print conditions
-        if t % 10 == 0 and t > 0:
-            cond1 = t > args.advstart_iter
-            cond2 = (t + 1 - args.advstart_iter) % args.T_min == 0
-            cond3 = counter_k < args.K
-            print(f"  Domain Aug Check: t={t}, cond1={cond1}, cond2={cond2}, cond3={cond3}, counter_k={counter_k}/{args.K}")
+        # if t % 10 == 0 and t > 0:
+        #     cond1 = t > args.advstart_iter
+        #     cond2 = (t + 1 - args.advstart_iter) % args.T_min == 0
+        #     cond3 = counter_k < args.K
+        #     print(f"  Domain Aug Check: t={t}, cond1={cond1}, cond2={cond2}, cond3={cond3}, counter_k={counter_k}/{args.K}")
         
         if (t > args.advstart_iter) and ((t + 1 - args.advstart_iter) % args.T_min == 0) and (counter_k < args.K):
-            print(f'\n🔄 Domain Augmentation at iteration {t} (counter_k={counter_k})')
+            print(f'\n🔄 Start Domain Augmentation at iteration {t} (counter_k={counter_k})')
             model.eval()
             params = list(model.parameters())
 
@@ -489,13 +512,15 @@ def train(model, exp_name, kwargs, device):
                 aug_optimizer = torch.optim.SGD([input_aug.requires_grad_()], args.lr_max)
 
                 if counter_k == 0:
-                    input_feat, output = model.functional(params, False, input_a, return_feat=True)
+                    # input_feat, output = model.functional(params, False, input_a, return_feat=True)
+                    input_feat, output = model(input_a, return_feat=True)
                     input_a_unnorm = safe_unnormalize(input_a, cifar_mean, cifar_std)
                     recon_batch, _, = wae(input_a_unnorm)
                     # Normalize back to standardized space and detach to prevent gradient issues
                     recon_batch_norm = safe_normalize(recon_batch, cifar_mean, cifar_std).detach()
                 else:
-                    input_feat, output = model.functional(params, False, input_comb, return_feat=True)
+                    # input_feat, output = model.functional(params, False, input_comb, return_feat=True)
+                    input_feat, output = model(input_comb, return_feat=True)
                     input_comb_unnorm = safe_unnormalize(input_comb, cifar_mean, cifar_std)
                     recon_batch, _, = wae(input_comb_unnorm)
                     # Normalize back to standardized space and detach to prevent gradient issues
@@ -510,7 +535,8 @@ def train(model, exp_name, kwargs, device):
                     print(f"  Starting adversarial generation with T_adv={args.T_adv} iterations")
                 for n in range(args.T_adv):
                     # input_aug_feat is the feature before classifier, output_aug is the logits
-                    input_aug_feat, output_aug = model.functional(params, False, input_aug, return_feat=True)
+                    # input_aug_feat, output_aug = model.functional(params, False, input_aug, return_feat=True)
+                    input_aug_feat, output_aug = model(input_aug, return_feat=True)
                     input_aug_unnorm = safe_unnormalize(input_aug, cifar_mean, cifar_std)
                     recon_batch_aug, _, = wae(input_aug_unnorm)
                     
@@ -527,7 +553,7 @@ def train(model, exp_name, kwargs, device):
                     adv_loss.backward()
                     aug_optimizer.step()
 
-                argumented_images_temp.append(input_aug.data.cpu().numpy())
+                argumented_images_temp.append(input_aug.detach().cpu().numpy())
                 # virtual_test_labels.append(target_aug.data.cpu().numpy())
 
             # tim, this function needs to be modified
@@ -574,7 +600,8 @@ def train(model, exp_name, kwargs, device):
         # start to train the model paramters
         # meta learning structure
 
-        model.train()
+        # print('finish augu, start normal training process') # Commented out to reduce verbose output
+
 
         try:
             id_input, id_target = next(id_loader_iter)
@@ -595,10 +622,28 @@ def train(model, exp_name, kwargs, device):
         # params = list(model.parameters())
         # output = model.functional(params, True, input)
         # loss = criterion(output, target)
+        # debug ---------------------------------------------------------------
+        # model.eval()  # 禁用 Dropout 和 BN 统计波动
+        # with torch.no_grad():
+        #     params = list(model.parameters())
+        #     logits_id = model.functional(params, True, id_input)
+        #     out2 = model(id_input)
+        
+        # assert torch.allclose(logits_id, out2, atol=1e-6), "Still mismatch!"
+        # ---------------------------------------------------------------------
+        model.train()
 
         params = list(model.parameters())
-        logits_id = model.functional(params, True, id_input)
-        logits_ood = model.functional(params, True, ood_input)
+        # logits_id = model.functional(params, True, id_input)
+        # logits_ood = model.functional(params, True, ood_input)
+    
+        # out2 = model(id_input)
+        # assert torch.allclose(logits_id, out2, atol=1e-6), "Mismatch between functional() and direct forward"
+        logits_id = model(id_input)
+        logits_ood = model(ood_input)
+
+
+        # stop using functional package
 
         loss_id = l_id(logits_id, id_target)
         loss_ood = l_oe(logits_ood)
@@ -617,8 +662,20 @@ def train(model, exp_name, kwargs, device):
         # instead of mixed oe loss. Maybe could use a second hyperparameter to control this.
         # set 'ood_weight2'
         else:
-            grads = torch.autograd.grad(loss, params, create_graph=True)
-            params = [(param - args.lr * grad).requires_grad_() for param, grad in zip(params, grads)]
+            # print('enter meta learning')
+            # grads = torch.autograd.grad(loss, params, create_graph=True)
+
+            # new trail
+            named_params = dict(model.named_parameters())
+            grads = torch.autograd.grad(loss, named_params.values(), create_graph=True)
+            fast_weights = OrderedDict(
+                (name, param - args.lr * grad)
+                for (name, param), grad in zip(named_params.items(), grads)
+            )
+
+            # grads = torch.autograd.grad(loss, model.parameters(), create_graph=True)
+            # fast_weights = [param - args.lr * grad for param, grad in zip(model.parameters(), grads)]
+            # params = [(param - args.lr * grad).requires_grad_() for param, grad in zip(params, grads)]
             try:
                 augumented_ood, _ = next(aug_loader_iter)
             except:
@@ -634,8 +691,13 @@ def train(model, exp_name, kwargs, device):
             augumented_ood = augumented_ood.to(device).float()
             id_input2, id_target2 = id_input2.to(device).float(), id_target2.to(device).long()
 
-            logits_id2 = model.functional(params, True, id_input2)
-            logits_ood2 = model.functional(params, True, augumented_ood)
+            # logits_id2 = model.functional(params, True, id_input2)
+            # logits_ood2 = model.functional(params, True, augumented_ood)
+
+            # logits_id2 = fast_model(id_input2)
+            # logits_ood2 = fast_model(augumented_ood)
+            logits_id2 = functional_call(model, fast_weights, (id_input2,))
+            logits_ood2 = functional_call(model, fast_weights, (augumented_ood,))
 
             loss_id2 = l_id(logits_id2, id_target2)
             loss_ood2 = l_oe(logits_ood2)
@@ -664,32 +726,32 @@ def train(model, exp_name, kwargs, device):
 
 
 
-        # tim eval process --------------------------------
-        # measure accuracy and record loss
-        # prec1 = accuracy(output.data, target, topk=(1,))[0]
-        # losses.update(loss.data.item(), input.size(0))
-        # top1.update(prec1.item(), input.size(0))
-        prec1 = accuracy(logits_id.data, id_target, topk=(1,))[0]
-        losses.update(loss.data.item(), id_input.size(0))
-        top1.update(prec1.item(), id_input.size(0))
-        # measure elapsed time
-        batch_time.update(time.time() - end)
+        # # tim eval process --------------------------------
+        # # measure accuracy and record loss
+        # # prec1 = accuracy(output.data, target, topk=(1,))[0]
+        # # losses.update(loss.data.item(), input.size(0))
+        # # top1.update(prec1.item(), input.size(0))
+        # prec1 = accuracy(logits_id.data, id_target, topk=(1,))[0]
+        # losses.update(loss.data.item(), id_input.size(0))
+        # top1.update(prec1.item(), id_input.size(0))
+        # # measure elapsed time
+        # batch_time.update(time.time() - end)
 
-        # if t % args.print_freq == 0:
-        #     print('Iter: [{0}][{1}/{2}]\t'
-        #           'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-        #           'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-        #           'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(t, t, args.num_iters, batch_time=batch_time, loss=losses, top1=top1))
-        #     # evaluate on validation set per print_freq, compute acc on the whole val dataset
-        #     prec1 = validate(val_loader, model)
-        #     print("validation set acc", prec1)
+        if t % args.print_freq == 0:
+            print('Iter: [{0}][{1}/{2}]\t'
+                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                  'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(t, t, args.num_iters, batch_time=batch_time, loss=losses, top1=top1))
+            # evaluate on validation set per print_freq, compute acc on the whole val dataset
+            # prec1 = validate(val_loader, model)
+            # print("validation set acc", prec1)
         
         # tim need to use validation of ood set every 10 epochs
 
         save_checkpoint({
             'iter': t + 1,
             'state_dict': model.state_dict(),
-            'prec': prec1,
+            # 'prec': prec1,
         }, args.dataset, exp_name)
         # ---------------------------------------------
 
@@ -697,7 +759,9 @@ def wae_train(model, D, new_aug_loader, optimizer, d_optimizer, epoch, device, m
 
     def sample_z(n_sample=None, dim=None, sigma=None, template=None):
         if template is not None:
-            z = sigma * Variable(template.data.new(template.size()).normal_())
+            # z = sigma * Variable(template.data.new(template.size()).normal_())
+            # for torch2
+            z = sigma * torch.randn_like(template)
         else:
             if n_sample is None:
                 n_sample = 32

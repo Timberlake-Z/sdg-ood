@@ -34,9 +34,10 @@ parser.add_argument('--epochs', default=16, type=int, help='Number of training e
 parser.add_argument('--batch_size', default=128, type=int, help='Batch size for ID data')
 parser.add_argument('--oe_batch_size', default=256, type=int, help='Batch size for auxiliary OE data')
 parser.add_argument('--test_bs', default=100, type=int, help='Test batch size')
-parser.add_argument('--lr', default=0.001, type=float, help='Learning rate')
-parser.add_argument('--momentum', default=0.9, type=float, help='SGD momentum')
-parser.add_argument('--weight_decay', default=0.0005, type=float, help='Weight decay')
+parser.add_argument('--lr', default=0.0001, type=float, help='Learning rate (same as main_ood.py)')
+# === BASIC OE VERSION: Comment out SGD-specific parameters not used in main_ood.py ===
+# parser.add_argument('--momentum', default=0.9, type=float, help='SGD momentum')
+# parser.add_argument('--weight_decay', default=0.0005, type=float, help='Weight decay')
 parser.add_argument('--oe_weight', default=0.5, type=float, help='Weight for OE loss')
 
 # Evaluation and saving
@@ -239,7 +240,7 @@ def accuracy(output, target, topk=(1,)):
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
 
-def train(net, train_loader_in, train_loader_out, optimizer, scheduler, device, args):
+def train(net, train_loader_in, train_loader_out, optimizer, device, args):
     """Train for one epoch using Outlier Exposure."""
     net.train()
     
@@ -282,7 +283,7 @@ def train(net, train_loader_in, train_loader_out, optimizer, scheduler, device, 
         # Backward pass
         total_loss.backward()
         optimizer.step()
-        scheduler.step()
+        # scheduler.step()  # Commented out - not used in main_ood.py
         
         # Calculate accuracy
         prec1 = accuracy(logits_in, target)[0]
@@ -352,9 +353,13 @@ def main():
     # Load model
     net = load_model(args, num_classes, device)
     
-    # Setup optimizer and scheduler
-    optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs * len(train_loader_in))
+    # === BASIC OE VERSION: Using Adam optimizer like main_ood.py ===
+    # Setup optimizer and scheduler (commented out advanced strategies not in main_ood.py)
+    # optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    # scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs * len(train_loader_in))
+    
+    # Use same optimizer as main_ood.py for fair comparison (Adam with fixed lr)
+    optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
     
     print(f"\nTraining setup:")
     print(f"  Epochs: {args.epochs}")
@@ -374,7 +379,7 @@ def main():
         print(f"\nEpoch [{epoch+1}/{args.epochs}]")
         
         # Training
-        train_loss, train_acc = train(net, train_loader_in, train_loader_out, optimizer, scheduler, device, args)
+        train_loss, train_acc = train(net, train_loader_in, train_loader_out, optimizer, device, args)
         
         # Testing  
         test_loss, test_acc = test(net, test_loader, device)
@@ -394,7 +399,7 @@ def main():
             'epoch': epoch + 1,
             'state_dict': net.state_dict(),
             'optimizer': optimizer.state_dict(),
-            'scheduler': scheduler.state_dict(),
+            # 'scheduler': scheduler.state_dict(),  # Commented out - no scheduler in basic version
             'best_acc': best_acc,
             'train_loss': train_loss,
             'train_acc': train_acc,

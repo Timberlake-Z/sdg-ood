@@ -149,7 +149,8 @@ def get_ood_scores(model, loader, device, in_dist=False, ood_num_examples=2000, 
                 break
             
             data = data.to(device)
-            output = model.module(data)  # Use model.module for Learner wrapper
+            # output = model.module(data)  # Use model.module for Learner wrapper
+            output = model(data)
             smax = F.softmax(output, dim=1)
             # Use negative max softmax probability as OOD score
             # ID samples: high confidence -> low score

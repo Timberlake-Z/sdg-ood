@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Model checkpoints and weights
+checkpoint/
+checkpoints/
+*.pth
+*.pth.tar
+*.pt
+*.ckpt
+
+# Datasets
+data/cifarpy/
+data/cifar-10-batches-py/
+data/cifar-100-python/
+*.tar.gz
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+temp/
+tmp/
